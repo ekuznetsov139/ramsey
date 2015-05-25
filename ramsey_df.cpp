@@ -6,6 +6,8 @@
 #include "graph.h"
 #include <omp.h>
 #ifdef WIN32
+#define USE_TBB
+#include <tbb/parallel_sort.h>
 #include <Windows.h> // InterlockedIncrement
 #endif
 
@@ -66,7 +68,11 @@ inline size_t rem_dup(vector<T>& v)
 {
 	if(v.empty())
 		return 0;
+#ifdef USE_TBB
+	tbb::parallel_sort(v.begin(), v.end());
+#else
 	sort(v.begin(), v.end());
+#endif
 	size_t sizePrev = v.size();
 	v.resize(unique(v.begin(), v.end())-v.begin());
 	return sizePrev-v.size();
@@ -106,7 +112,6 @@ void prealloc_graph_pool(graph*& graph_pool, int len)
 		}
 	}
 }
-
 
 void graph_check(graph& g, int kmax[2], const char* msg)
 {
@@ -270,7 +275,6 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 //	exit(-1);
 	uint64_t t0=__rdtsc();
 	uint64_t op_count=0;
-
 	int len = sig.len;
 	bool ok = build_graph3(g[len-1], base_mask, kmax);
 	if(!ok)
@@ -283,7 +287,8 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 
 	int pos = len, bit=0;
 	int max_len=0;
-
+	int sym_len=0;
+	int sym_known_pos=0;
 	graph& gc=g[len-1];
 	gc.n=len;
 	gc.check_first_unset_bit();
@@ -303,6 +308,7 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 		gmin[i].reset();
 	}
 
+
 	while(true)
 	{
 		graph& gc = g[pos];
@@ -314,9 +320,7 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 			set_count -= (delta-2)/6;
 		gc.set_extensions = false;
 
-
 		int next_bit=set_count;
-		
 		bool dup = false;
 		if(delta>=6 && (delta % 6)==1)
 		{
@@ -331,13 +335,7 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 		
 		if(!dup)// && g_kmax[0]>=g_kmax[1])
 		{
-			int sum0=0, sum1=0;
-			for(int i=0; i<set_count; i++)
-			{
-				sum0+=gp.mask0.bit(i);
-				sum1+=gp.mask.bit(i);
-			}
-			if(sum1>sum0)
+			if(g_kmax[0] > g_kmax[1])
 				bit_val=1-bit;
 		}
 		
@@ -365,7 +363,7 @@ int depth_search(bigint sig, int kmax[2], int target, int stop_point, bool detec
 				for(int i=len; i<len+8; i++)
 					if(gp.mask.bit(i))
 						progress += pow(2.0, -(i-len)-1);
-				printf("...thread %d sig 0x%llx_0x%llx: %.1f%% done, max %d, %lld ops\n", thr, 
+				printf("...thread %d sig 0x%llx_0x%llx: %.1f%% done, max %d, %I64d ops\n", thr, 
 					sig.n[0], sig.n[1], progress*100.0, max_len+2, op_count);
 				tIntReportPrev = tInt;
 			}
@@ -615,7 +613,7 @@ done:
 
 int depth_search(uint64_t sig, int len, int kmax[2], int target, int stop_point, bool detect_only, bool quiet, int* populations, graph* graph_pool, int thr, buffer<bigint>* pHits=0, uint64_t max_ops=0)
 {
-	bigint b;
+	bigint b;	
 	b.clear();
 	b.n[0]=sig;
 	b.set_len(len);
@@ -666,6 +664,10 @@ int undivided_depth_search_job(void* arg)
 	cover_list.alloc(1.5*pState->nbases/pState->nthr);
 	while(true)
 	{
+		uint64_t share = (pos+pState->nbases/100 - 1) * 100 / pState->nbases;
+		if (pos == pState->nbases*share / 100)
+			printf("%d%%...\n", share);
+
 		bigint val = pState->bases[pos];
 		hits.clear();
 		memset(local_populations, 0, sizeof(local_populations));
@@ -955,10 +957,10 @@ void neighbor_base_cover(bigint sig, uint64_t max_len)
 
 vector<pair<uint64_t,uint64_t> > g_mc_exclusions;
 
-string format_name(int len, int target)
+string format_name(int len, int target, string prefix=string())
 {
 	char temp[128];
-	sprintf(temp, PATH "%d%d-%d-%d.txt", g_kmax[0]+2, g_kmax[1]+2, len+1, target);
+	sprintf(temp, PATH "%s%d%d-%d-%d.txt", prefix.c_str(), g_kmax[0]+2, g_kmax[1]+2, len+1, target);
 	return string(temp);
 }
 
@@ -966,6 +968,13 @@ string format_cover_name(int len, int target)
 {
 	char temp[128];
 	sprintf(temp, PATH "cover%d%d-%d-%d.txt", g_kmax[0]+2, g_kmax[1]+2, len+1, target);
+	return string(temp);
+}
+
+string format_cover_name_offby2(int len, int target)
+{
+	char temp[128];
+	sprintf(temp, PATH "cover%d%d-%d-%d-offby2.txt", g_kmax[0]+2, g_kmax[1]+2, len+1, target);
 	return string(temp);
 }
 
@@ -1021,9 +1030,14 @@ void readfile(const char* fn, vector<bigint>& sigs, int len)
 	fclose(f);
 }
 
-void writefile(const char* fn, vector<bigint>& sigs, int len)
+void writefile(const char* fn, vector<bigint>& sigs, int len, bool append=false)
 {
-	FILE* f=fopen(fn, "w");
+	if(append==false && sigs.empty())
+	{
+		_unlink(fn);
+		return;
+	}
+	FILE* f=fopen(fn, append ? "a" : "w");
 	if(!f)
 	{
 		printf("ERROR: failed to open %s for writing\n", fn);
@@ -1042,6 +1056,11 @@ void writefile(const char* fn, vector<bigint>& sigs, int len)
 			fprintf(f, "0x%llx\t0x%llx\n", sigs[i].n[0], sigs[i].n[1]);
 	}
 	fclose(f);
+}
+
+void writefile(string str, vector<bigint>& sigs, int len, bool append=false)
+{
+	writefile(str.c_str(), sigs, len, append);
 }
 
 void readfile(string fn, vector<bigint>& sigs, int len)
@@ -1226,7 +1245,7 @@ void neighbor_hit_detect_v2(uint64_t pos, bigint sig, buffer<bigint>* p, int max
 	g_ns2_hits.push_back(sig);
 }
 
-vector<bigint> neighbor_depth_search_v2(int len, int k0, int k1, int target, vector<bigint>& vsig0, vector<bigint>& vexcl)
+vector<bigint> neighbor_depth_search_v2(int len, int k0, int k1, int target, const vector<bigint>& vsig0, vector<bigint>& vexcl)
 {
 	vector<bigint> vsig;
 	int nsigs0 = vsig0.size();
@@ -1249,7 +1268,7 @@ vector<bigint> neighbor_depth_search_v2(int len, int k0, int k1, int target, vec
 	JobArray array;
 	array.base_cover_name.clear();
 	array.submit(&vsig[0], vsig.size(), len, target, target+1, true, 0, 0, neighbor_hit_detect_v2);
-//	printf("%d -> %d\n", vsig.size(), g_ns2_hits.size());
+	printf("%d -> %d (%.3f)\n", vsig.size(), g_ns2_hits.size(), array.realtime / g_fFreq);
 	return g_ns2_hits;
 }
 
@@ -1339,6 +1358,18 @@ int neighbor_depth_search(int len, int k0, int k1, int target, int max_cluster=I
 	int nsigs0 = vsig0.size();
 	if(g_offby2)
 	{
+		for(int i=0; i<vsig0.size(); i++)
+		{
+			uint64_t pos1 = rand64() % vsig0.size();
+			uint64_t pos2 = rand64() % (vsig0.size()-1);
+			if(pos2==pos1)
+				pos2++;
+			swap(vsig0[pos1], vsig0[pos2]);
+		}
+		vsig0.resize(vsig0.size()/20);
+		nsigs0=vsig0.size();
+		
+
 		vsig.resize((len-1)*(len-1)*nsigs0);
 		for(int i=0; i<nsigs0; i++)
 			for(int j=0; j<len-1; j++)
@@ -1618,8 +1649,9 @@ int dist(bigint a, const vector<bigint>& vb)
 	int min_dist=100;
 	for(int i=0; i<vb.size(); i++)
 	{
-		if(dist(a,vb[i])==1)
-			return 1;
+		int d=dist(a,vb[i]);
+		if(min_dist>d)
+			min_dist=d;
 	}
 	return min_dist;
 }
@@ -1648,38 +1680,16 @@ void clusterize_part2(vector<vector<bigint> >& vv)
 		vector<int> pairwise_dist;
 		pairwise_dist.resize(vv.size()*vv.size());
 #pragma omp parallel for
-		for(int thr=0; thr<4; thr++)
+		for(int thr=0; thr<24; thr++)
 		{
-			int low, high;
-			if(thr==0)
+			for(uint64_t idx=thr; idx<vv.size()*vv.size(); idx+=24)
 			{
-				low=0;
-				high=vv.size()/8;
-			}
-			else if(thr==1)
-			{
-				low=vv.size()/8;
-				high=vv.size()/4;
-			}
-			else if(thr==2)
-			{
-				low=vv.size()/4;
-				high=vv.size()/2;
-			}
-			else
-			{
-				low=vv.size()/2;
-				high=vv.size();
-			}
-
-
-			for(int i=low; i<high; i++)
-			{
-				for(int j=i+1; j<vv.size(); j++)
-				{
-					pairwise_dist[i+j*vv.size()] = dist(vv[i], vv[j]);
-					pairwise_dist[j+i*vv.size()] = pairwise_dist[i+j*vv.size()] ;
-				}
+				uint64_t i = idx % vv.size();
+				uint64_t j = idx / vv.size();
+				if(i<j)
+					continue;
+				pairwise_dist[i+j*vv.size()] = dist(vv[i], vv[j]);
+				pairwise_dist[j+i*vv.size()] = pairwise_dist[i+j*vv.size()] ;
 			}
 		}
 		int change=0;
@@ -1883,13 +1893,13 @@ int lengthen(const char* fn, int k0, int k1, int len, int lenNext, int target)
 	printf("%d new\n", vsigExclLong.size());
 	FILE* f=fopen(neighbor_base_cover_name.c_str(), "a");
 	for(uint64_t i=0; i<vx.size(); i++)
-		fprintf(f, "0x%I64x\n", vx[i].n[0]);
+		fprintf(f, "0x%llx\n", vx[i].n[0]);
 	fclose(f);
 	*/
 	/*
 	FILE* f=fopen(parent_cover_name.c_str(), "a");
 	for(uint64_t i=0; i<vsigExclLong.size(); i++)
-		fprintf(f, "0x%I64x\n", vsigExclLong[i].n[0]);
+		fprintf(f, "0x%llx\n", vsigExclLong[i].n[0]);
 	fclose(f);
 	*/
 	printf("%d candidates\n", vsig.size());
@@ -1911,21 +1921,22 @@ void do77_part1()
 	while(true)
 	{
 		g_ns_exclusions.clear();
+		if(1)
+		{
+			_unlink(PATH "77-55-110.txt");
+			_unlink(PATH "77-45-110.txt");
+			_unlink(PATH "77-55-115.txt");
+			_unlink(PATH "77-55-120.txt");
+			_unlink(PATH "77-55-125.txt");
 
-		_unlink(PATH "77-55-110.txt");
-		_unlink(PATH "77-45-110.txt");
-		_unlink(PATH "77-55-115.txt");
-		_unlink(PATH "77-55-120.txt");
-		_unlink(PATH "77-55-125.txt");
+			_unlink(PATH "cover77-55-110.txt");
+			_unlink(PATH "cover77-45-110.txt");
+			_unlink(PATH "cover77-55-115.txt");
+			_unlink(PATH "cover77-55-120.txt");
+			_unlink(PATH "cover77-55-125.txt");
 
-		_unlink(PATH "cover77-55-110.txt");
-		_unlink(PATH "cover77-45-110.txt");
-		_unlink(PATH "cover77-55-115.txt");
-		_unlink(PATH "cover77-55-120.txt");
-		_unlink(PATH "cover77-55-125.txt");
-
-		cover_rebuild(54,5,5,128);
-
+			cover_rebuild(54,5,5,128);
+		}
 		FILE* f;
 
 		g_max_ops=1e5;
@@ -1933,6 +1944,7 @@ void do77_part1()
 		uint64_t time_zones[7];
 		int hit_counts[7];
 		memset(hit_counts, 0, sizeof(hit_counts));
+#if 1
 		t0=__rdtsc();
 		hit_counts[0]=0;
 	//	for(int pass=0; pass<10; pass++)
@@ -1958,9 +1970,10 @@ void do77_part1()
 			}
 		writefile(PATH "cover77-50-110.txt", v2, 49);
 	
-		g_max_ops=1e4;
 		t1=__rdtsc();
 		time_zones[0]=t1-t0;
+#endif
+		g_max_ops=1e4;
 		g_ns_exclusions.push_back(make_pair(54,128));
 
 		t0=__rdtsc();
@@ -2193,12 +2206,606 @@ void do510_part1(int d1, int d2, int d3, int nRepeat1, int nRepeat2, int nRepeat
 	fclose(f);
 }
 
+void fs_hit_detect(uint64_t pos, bigint sig, buffer<bigint>* p, int max_len)
+{
+	FILE* f = fopen(PATH "fullsearch.txt", "a");
+	if(sig.len>64)
+		fprintf(f, "%d\t%d\t0x%llx\t0x%llx\n", g_kmax[0], g_kmax[1], sig.n[0], sig.n[1]);
+	else
+		fprintf(f, "%d\t%d\t0x%llx\n", g_kmax[0], g_kmax[1], sig.n[0]);
+	fclose(f);
+	for (int i = 0; i<p->size(); i++)
+	{
+		bigint& x = (*p)[i];
+		int d = x.len + 1;
+		if (d == max_len)
+		{
+			bigint inv;
+			invert(inv, x);
+			if (bit_equal(x, inv))
+			{
+				printf("%d\t0x%llx\t0x%llx\t0x%llx\t0x%llx\n", d, x.n[0], x.n[1], x.n[2], x.n[3]);
+			}
+		}
+	}
+}
+
+void do_full_search(int k0, int k1, int dim, int target)
+{
+	g_kmax[0]=k0;
+	g_kmax[1]=k1;
+	vector<bigint> v;
+	size_t nOpts = 1<<(dim-1);
+	int covered = 2048;
+	v.resize(nOpts-covered);
+	for(size_t i=covered; i<nOpts; i++)
+	{
+		v[i-covered].clear();
+		v[i-covered].set_len(dim);
+		v[i-covered].n[0]=i*2;
+	}
+	nOpts=1024;
+	v.resize(nOpts);
+	JobArray array;
+	//array.submit(&v[0], v.size(), dim, target, target+1, true, 0, 0, fs_hit_detect);
+	array.submit(&v[0], v.size(), dim, target, MAX_LEN*64+1, true, 0, 0, fs_hit_detect);
+	printf("%d -> %d\n", v.size(), array.sum_populations[target]);
+	array.print_populations();
+	array.print_cputime();
+}
+
+void do_partial_search(int k0, int k1, int dim, int target, uint64_t base, int dim0)
+{
+	g_kmax[0]=k0;
+	g_kmax[1]=k1;
+	vector<bigint> v;
+	size_t nOpts = 1<<dim;
+	v.resize(nOpts);
+	for(size_t i=0; i<nOpts; i++)
+	{
+		v[i].clear();
+		v[i].set_len(dim+dim0);
+		v[i].n[0]=base + (i<<dim0);
+	}
+	JobArray array;
+	//array.submit(&v[0], v.size(), dim, target, target+1, true, 0, 0, fs_hit_detect);
+	array.submit(&v[0], v.size(), dim+dim0+1, target, MAX_LEN*64+1, false, 0, 0, fs_hit_detect);
+	printf("%d -> %d\n", v.size(), array.sum_populations[target]);
+	array.print_populations();
+	array.print_cputime();
+}
+
+
+string g_symfn, g_symcoverfn;
+vector<bigint> g_sym_graphs;
+
+void sym_hit_detect(uint64_t pos, bigint sig, buffer<bigint>* p, int max_len)
+{
+	int i;
+	for (i = 0; i<p->size(); i++)
+	{
+		bigint& x = (*p)[i];
+		int d = x.len + 1;
+		if (d == max_len)
+		{
+			bigint inv;
+			invert(inv, x);
+			if (bit_equal(x, inv))
+			{
+				FILE* f = fopen(g_symfn.c_str(), "a");
+#if MAX_LEN==4
+				fprintf(f, "%d\t0x%llx\t0x%llx\t0x%llx\t0x%llx\n",
+					d, x.n[0], x.n[1], x.n[2], x.n[3]);
+#else
+				fprintf(f, "%d\t0x%llx\t0x%llx\n",
+					d, x.n[0], x.n[1]);
+#endif
+				fclose(f);
+				g_sym_graphs.push_back(x);
+			}
+		}
+	}
+	FILE* f=fopen(g_symcoverfn.c_str(), "a");
+	if(sig.len<=64)
+		fprintf(f, "0x%llx\n", sig.n[0]);
+	else
+		fprintf(f, "0x%llx\t0x%llx\n", sig.n[0], sig.n[1]);
+	fclose(f);
+}
+
+
+void sym_hit_miss(uint64_t pos, bigint sig, buffer<bigint>* p, int max_len)
+{
+	FILE* f=fopen(g_symcoverfn.c_str(), "a");
+	if(sig.len<=64)
+		fprintf(f, "0x%llx\n", sig.n[0]);
+	else
+		fprintf(f, "0x%llx\t0x%llx\n", sig.n[0], sig.n[1]);
+	fclose(f);
+}
+
+
+
+int gcd(int x, int y)
+{
+	if (x < y)
+		swap(x, y);
+	while (true)
+	{
+		x = x%y;
+		if (x == 0)
+			return y;
+		swap(x, y);
+	}
+}
+
+void relabel(vector<bigint>& vnew, vector<bigint>& vnewAlt, int d, const vector<bigint>& v)
+{
+	for (int i = 0; i < v.size(); i++)
+	{
+		bigint x = v[i];
+		for (int j = 2; j * 2 < x.len; j++)
+		//for (int j = 2; j <= 2; j++)
+		{
+			if (gcd(j, x.len+1) != 1)				
+				continue;
+			bigint y;
+			y.clear();
+			y.set_len(x.len);
+			for (int k = 0; k < x.len; k++)
+				if (x.bit((((k+1)*j) % (x.len+1)) - 1))
+					y.set(k);
+			bigint inv;
+			invert(inv, y);
+//			printf("*");
+			if (!bit_equal(y, inv))
+			{
+				printf("ERROR: graph not symmetric after relabel (j=%d)\n", j);
+				x.print();
+				y.print();
+				return;
+			}
+			y.unset_from(d);			
+			y.set_len(d);
+			if (y.n[0] & 1)
+			{
+				y.n[0] ^= ((One << d) - One);
+				if(g_kmax[0]==g_kmax[1])
+					vnew.push_back(y);
+				else
+					vnewAlt.push_back(y);
+			}
+			else
+			{
+				vnew.push_back(y);
+			}
+		}
+	}
+	rem_dup(vnew);
+	rem_dup(vnewAlt);
+}
+
+
+void readsym(string s, vector<bigint>& v)
+{
+	FILE* f = fopen(s.c_str(), "r");
+	if (f != 0)
+	{
+		while (!feof(f))
+		{
+			int dd;
+			uint64_t n[4];
+#if MAX_LEN==2
+			fscanf(f, "%d\t0x%llx\t0x%llx\n", &dd, &n[0], &n[1]);
+#else
+			fscanf(f, "%d\t0x%llx\t0x%llx\t0x%llx\t0x%llx\n", &dd, &n[0], &n[1], &n[2], &n[3]);
+#endif
+			bigint y;
+			y.set_len(dd - 1);
+			y.n[0] = n[0];
+			y.n[1] = n[1];
+#if MAX_LEN==4
+			y.n[2] = n[2];
+			y.n[3] = n[3];
+#endif
+			v.push_back(y);
+		}
+		fclose(f);
+	}
+}
+
+void do_relabeling(int d, int target, int k0, int k1, bool initial)
+{
+	vector<bigint> vsig, vsigAlt;
+	if(k0!=k1)
+	{
+		g_kmax[0] = k1;
+		g_kmax[1] = k0;
+		readfile(format_name(d, target), vsigAlt, d);
+	}
+
+	g_kmax[0] = k0;
+	g_kmax[1] = k1;
+	readfile(format_name(d, target), vsig, d);
+	vector<bigint> vsigRef = vsig;
+	g_symfn = format_name(d, target, "sym");
+	g_symcoverfn = format_name(d, target, "symcover");
+
+	FILE* f=fopen(g_symfn.c_str(), "r");
+	vector<uint64_t> symcover;	
+	readsym(g_symfn, g_sym_graphs);
+
+	printf("%d elements in sig list\n", vsig.size());
+
+	vector<bigint> vsigExcl;
+	readfile(g_symcoverfn, vsigExcl, d);
+
+	int nEx=exclude(vsig, vsigExcl);
+	printf("%d previously covered\n", nEx);
+
+	if(initial)
+	{
+		vector<bigint> vnew;
+		vector<bigint> vnewAlt;
+		relabel(vnew, vnewAlt, d, g_sym_graphs);
+		nEx = exclude(vsig, vnew);
+
+		vector<bigint> alt_sym_graphs;
+		g_kmax[0] = k1;
+		g_kmax[1] = k0;
+		vnew.clear();
+		vnewAlt.clear();
+		readsym(format_name(d, target, "sym"), alt_sym_graphs);
+		relabel(vnew, vnewAlt, d, alt_sym_graphs);
+
+		g_kmax[0] = k0;
+		g_kmax[1] = k1;
+
+		nEx += exclude(vsig, vnewAlt);
+
+		printf("%d duplicate of previously processed\n", nEx);		
+		printf("%d left\n", vsig.size());
+		random_shuffle(vsig.begin(), vsig.end());
+
+		JobArray array;
+		//array.base_cover_name.clear();
+		array.submit(&vsig[0], vsig.size(), d, target, MAX_LEN*64, false, 0, 0, sym_hit_detect, sym_hit_miss);
+	}
+
+	printf("%d symmetric\n", g_sym_graphs.size());
+	vector<bigint> vnew;
+	vector<bigint> vnewAlt;
+	relabel(vnew, vnewAlt, d, g_sym_graphs);
+	printf("Found %d + %d candidate signatures\n", vnew.size(), vnewAlt.size()	);
+	exclude(vnew, vsigRef);
+	exclude(vnew, vsigExcl);
+	exclude(vnewAlt, vsigAlt);
+	printf("%d + %d not in known list\n", vnew.size(), vnewAlt.size());
+	if (vnew.size()>0)
+	{
+		writefile(format_name(d, target), vnew, d, true);
+		writefile(format_cover_name(d, target), vnew, d, true);
+	}
+	if(k0!=k1)
+	{
+		g_kmax[0] = k1;
+		g_kmax[1] = k0;
+		if (vnewAlt.size()>0)
+		{
+			writefile(format_name(d, target), vnewAlt, d, true);
+			writefile(format_cover_name(d, target), vnewAlt, d, true);
+		}
+	}
+}
+
+void list_permutations(bigint x)
+{
+	for (int j = 2; j * 2 < x.len; j++)
+	//for (int j = 2; j <= 2; j++)
+	{
+		if (gcd(j, x.len+1) != 1)				
+			continue;
+		bigint y;
+		y.clear();
+		y.set_len(x.len);
+		for (int k = 0; k < x.len; k++)
+			if (x.bit((((k+1)*j) % (x.len+1)) - 1))
+				y.set(k);
+		if(y.bit(0))
+		{
+			y.neg();
+			y.unset_from(y.len);
+		}
+		printf("0x%llx 0x%llx 0x%llx 0x%llx\n", y.n[0], y.n[1], y.n[2], y.n[3]);
+		bigint inv;
+		invert(inv, y);
+		if (!bit_equal(y, inv))
+			printf("Error: not symmetric\n");
+	}
+}
+
+extern uint64_t g_move_up, g_zero, g_low;
+
+
+void op_report(int d, int len)
+{
+	FILE* f = fopen(PATH "op_report.txt", "a");
+	fprintf(f, "%d\t%d\t", d, len);
+	if (!op_counts[0].empty())
+	{
+		sort(op_counts[0].begin(), op_counts[0].end());
+		uint64_t sum = 0;
+		for (int i = 0; i<op_counts[0].size(); i++)
+			sum += op_counts[0][i];
+		printf("misses: %d calls, median %d, 99th percentile %d, max %d, mean %d\n", op_counts[0].size(), op_counts[0][op_counts[0].size() / 2], op_counts[0][op_counts[0].size() * 99 / 100], op_counts[0].back(), (int)(sum / op_counts[0].size()));
+		fprintf(f, "%d\t%d\t%d\t%d\t%d\t", op_counts[0].size(), op_counts[0][op_counts[0].size() / 2], op_counts[0][op_counts[0].size() * 99 / 100], op_counts[0].back(), (int)(sum / op_counts[0].size()));
+		op_counts[0].clear();
+	}
+	if (!op_counts[1].empty())
+	{
+		sort(op_counts[1].begin(), op_counts[1].end());
+		uint64_t sum = 0;
+		for (int i = 0; i<op_counts[1].size(); i++)
+			sum += op_counts[1][i];
+		printf("hits: %d calls, median %d, 99th percentile %d, max %d, mean %d\n", op_counts[1].size(), op_counts[1][op_counts[1].size() / 2], op_counts[1][op_counts[1].size() * 99 / 100], op_counts[1].back(), (int)(sum / op_counts[1].size()));
+		fprintf(f, "%d\t%d\t%d\t%d\t%d\t", op_counts[1].size(), op_counts[1][op_counts[1].size() / 2], op_counts[1][op_counts[1].size() * 99 / 100], op_counts[1].back(), (int)(sum / op_counts[1].size()));
+		op_counts[1].clear();
+	}
+	fprintf(f, "\n");
+	fclose(f);
+}
+
+
+void in_memory_neighbor_search(int d, int target0, int cap, vector<bigint>& v, vector<bigint>& cover)
+{
+	rem_dup(v);
+	vector<vector<bigint> > vv;
+	if(v.size() < 1e5)
+	{
+		clusterize(vv, v);
+	}
+	else
+	{
+		vector<bigint> v_part;
+		random_shuffle(v.begin(), v.end());
+		int step = 1e5;
+		while(!v.empty())
+		{
+			v_part=v;
+			if(v_part.size()>step)
+				v_part.resize(step);
+			vector<vector<bigint> > vv2;
+			clusterize(vv2, v_part);
+			//append(vv, vv2);
+			size_t s = vv.size();
+			vv.resize(s+vv2.size());
+			for(size_t i=0; i<vv2.size(); i++)
+				vv[s+i].swap(vv2[i]);
+			v_part.clear();
+			printf("Part 1: %d clusters\n", vv.size());
+			vector<int> indexes;
+			indexes.resize(v.size());
+			for(size_t i=0; i<v.size(); i++)
+				indexes[i]=-1;
+#pragma omp parallel for
+			for(int thr=0; thr<24; thr++)
+			{
+				for(size_t i=step+thr; i<v.size(); i+=24)
+				{
+					for(size_t j=0; j<vv.size(); j++)
+					{
+						if(dist(v[i],vv[j])==1)
+						{
+							indexes[i]=j;
+							break;
+						}
+					}
+				}
+			}
+			for(int i=step; i<v.size(); i++)
+			{
+				if(indexes[i]>=0)
+					vv[indexes[i]].push_back(v[i]);
+				else
+					v_part.push_back(v[i]);
+			}
+			clusterize_part2(vv);
+			printf("Joined: %d clusters\n", vv.size());
+			v.swap(v_part);
+			printf("Left: %d\n", v.size());
+			/*
+			printf("%d not included\n", v_part.size());
+			if(!v_part.empty())
+			{
+				vector<vector<bigint> > vv2;
+				clusterize(vv2, v_part);
+				printf("Part 2: %d clusters\n", vv2.size());
+				append(vv, vv2);
+			}
+			*/
+		}
+	}
+	vector<int> states;
+	states.resize(vv.size());
+	size_t i;
+	for (i = 0; i < vv.size(); i++)
+		states[i] = (vv[i].size()>=cap) ? 2 : 0;
+	while (true)
+	{
+		vector<bigint> cand;
+		vector<int> indexes;
+		for (i = 0; i < vv.size(); i++)
+		{
+			if (states[i] != 0)
+				continue;
+			append(cand, vv[i]);
+			for (int j = 0; j < vv[i].size(); j++)
+				indexes.push_back(i);
+		}
+		if (cand.empty())
+			break;
+		vector<bigint> v = neighbor_depth_search_v2(d, g_kmax[0], g_kmax[1], target0, cand, cover);
+		if (v.empty())
+			break;
+		vector<int> new_hits;
+		new_hits.resize(vv.size());
+		for (i = 0; i < new_hits.size(); i++)
+			new_hits[i] = 0;
+
+		indexes.resize(v.size());
+#pragma omp parallel for
+		for (int thr = 0; thr < nthreads; thr++)
+		{
+			int low = v.size()*thr / nthreads;
+			int high = v.size()*(thr + 1) / nthreads;
+			for (int i = low; i < high; i++)
+			{
+				indexes[i] = -1;
+				for (size_t j = 0; j < vv.size(); j++)
+				{
+					if (dist(v[i], vv[j]) <= 1)
+					{
+						indexes[i] = j;
+						break;
+					}
+				}
+			}
+		}
+		for (i = 0; i < v.size(); i++)
+		{
+			if (indexes[i] < 0)
+				printf("ERROR: did not find clusters for 0x%llx\n", v[i]);
+			else
+			{
+				vv[indexes[i]].push_back(v[i]);
+				new_hits[indexes[i]]++;
+			}
+		}
+
+		for (i = 0; i < vv.size(); i++)
+		{
+			if (new_hits[i] == 0)
+				states[i] = 1; // full
+			if (vv[i].size() >= cap)
+				states[i] = 2;
+		}
+	}
+	v.clear();
+	for (i = 0; i < vv.size(); i++)
+		append(v, vv[i]);
+}
+
+
+int narrow_memory(vector<bigint>& vsig, int len, int targetPrev, int target, vector<bigint>& results)
+{
+	printf("narrow(%d, %d, %d)\n", len, targetPrev, target);
+	int nEx = rem_dup(vsig);
+	if (nEx != 0)
+		printf("%d duplicate\n", nEx);
+
+	g_ns2_hits.clear();
+	JobArray array;
+	int stop_size = target + 1;
+	array.submit(&vsig[0], vsig.size(), len, target, stop_size, true, 0, 0, neighbor_hit_detect_v2, 0);
+	array.print_cputime();
+	int hits = array.sum_populations[target];
+	double tm = array.realtime / g_fFreq;
+	printf("%d -> %d\n", vsig.size(), hits);
+	FILE* ff = fopen(PATH "neighbor-search-log.txt", "a");
+	fprintf(ff, "%d\t%d\t%.3f\t(narrow)\n", vsig.size(), hits, tm);
+	fclose(ff);
+	results.swap(g_ns2_hits);
+	return results.size();
+}
+
+void in_memory_search(int d, int k0, int k1, int target0, int target1, int cap, vector<bigint>& v, vector<bigint>& cover)
+{
+	size_t size_initial=v.size();
+	uint64_t t0, t1;
+	t0 = __rdtsc();
+	g_kmax[0] = k0;
+	g_kmax[1] = k1;
+	g_max_ops = 1e4;
+	
+	//mc_memory(d, g_kmax[0], g_kmax[1], target0, nMC, &v);
+	int mc_hits = v.size();
+
+	in_memory_neighbor_search(d, target0, cap, v, cover);
+	op_report(d, target0);
+
+	if(target1 != target0)
+	{
+		vector<bigint> v2;
+		narrow_memory(v, d, target0, target1, v2);
+		v.swap(v2);
+		op_report(d, target1);
+	}
+	writefile(format_name(d, target1), v, d, false);
+	writefile(format_cover_name(d, target1), cover, d, false);
+
+	t1 = __rdtsc();
+	FILE* f = fopen(PATH "log_inmem.txt", "a");
+	fprintf(f, "%d\t%d\t%d\t%d\t%d\t%.3f\n", target0, target1, cap, size_initial, v.size(), (t1 - t0) / g_fFreq);
+	fclose(f);	
+}
+
+void backmerge(int d, int k0, int k1, int targetPrev, int target)
+{
+	vector<bigint> v;
+	g_kmax[0]=k0;
+	g_kmax[1]=k1;
+	readfile(format_name(d,targetPrev),v,d);
+	readfile(format_name(d,target),v,d);
+	rem_dup(v);
+	writefile(format_name(d,target),v,d);
+	v.clear();
+	readfile(format_name(d,targetPrev),v,d);
+	readfile(format_cover_name(d,target),v,d);
+	rem_dup(v);
+	writefile(format_cover_name(d,target),v,d);
+}
+
+void merge(int d, int k0, int k1, int target, const char* fn)
+{
+	vector<bigint> v;
+	g_kmax[0]=k0;
+	g_kmax[1]=k1;
+	readfile(fn,v,d);
+	readfile(format_name(d,target),v,d);
+	rem_dup(v);
+	writefile(format_name(d,target),v,d);
+	v.clear();
+	readfile(fn,v,d);
+	readfile(format_cover_name(d,target),v,d);
+	rem_dup(v);
+	writefile(format_cover_name(d,target),v,d);
+}
+
+void do96_part2()
+{
+	vector<bigint> v, cover;
+	g_kmax[0]=7;
+	g_kmax[1]=4;
+	g_max_ops=1e4;
+	readfile(PATH "96-64-130.txt", v, 63);
+	readfile(PATH "cover96-64-130.txt", cover, 63);
+	in_memory_search(63, 7, 4, 130, 135, 80, v, cover);
+	in_memory_search(63, 7, 4, 135, 140, 80, v, cover);
+	in_memory_search(63, 7, 4, 140, 145, 160, v, cover);
+	in_memory_search(63, 7, 4, 145, 150, 320, v, cover);
+	while(neighbor_depth_search(63,7,4,150)!=0);
+	narrow(63,150,160);
+}
+
 int main(int argc, char* argv[])
 {
 	omp_set_num_threads(nthreads+1);
-	omp_init_lock(&op_count_lock);
-	//do77_part1();
-	cover_rebuild(54, 3, 8, 128);
-	do510_part1(110, 115, 120, 2, 3, 0, 1e7);
+	omp_init_lock(&op_count_lock); 
+	g_max_ops=1e4;
+
+	g_kmax[0]=4;
+	g_kmax[1]=7;
+	do_relabeling(63,160,7,4, true);
+	do_relabeling(63,160,4,7, true);
 	return 0;
 }

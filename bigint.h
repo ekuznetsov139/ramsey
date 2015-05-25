@@ -3,8 +3,8 @@
 #include <emmintrin.h>
 #include <immintrin.h>
 
-#define MAX_DEPTH 10
-#define MAX_LEN 2
+#define MAX_DEPTH 12
+#define MAX_LEN 4
 #ifdef WIN32
 typedef unsigned __int64 uint64_t;
 typedef signed __int64 int64_t;

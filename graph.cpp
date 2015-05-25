@@ -543,12 +543,24 @@ bool recurse_object::unrolled_flat_search()
 
 		v_curr_cl[1]=v_curr_cl[0];
 		v_curr_cl[1].set(b0);
-
+		
+		if(1>=nMinCliqueSize)
+		{
+			bigint current_clique;
+			current_clique.clear();
+			current_clique.set_len(lastbit+1);
+			current_clique.set(new_bit);
+			current_clique.set(b0);
+			current_clique.popcnt=2;
+			clique_counts[color][depth]+=1;
+			v.push_back(current_clique);
+		}
+		
 		if(2>=nMinCliqueSize)
 		{
-			if(2>=kmax)
-				return false;
 			uint64_t cls = popcnt(stack[1]);
+			if(2==kmax && cls>0)
+				return false;
 			uint64_t pos = v.size();
 			v.resize(pos+cls);
 			bigint y = stack[1];
@@ -628,148 +640,99 @@ bool recurse_object::unrolled_flat_search()
 
 		while(true)
 		{
-			bits[depth]=stack[depth].trailing_bit();
+			int b = stack[depth].trailing_bit();
+			bits[depth]=b;
 			depth++;
 			//stack[depth]=stack[depth-1] & inv_masks[bits[depth-1]];
-			store_and(stack[depth], stack[depth-1], inv_masks[bits[depth-1]]);
-			int x = depth+popcnt(stack[depth]);
-			if(x<=nMinCliqueSize)
+			//bare_bigint t = stack[depth-1], inv_masks[b]
+			store_and(stack[depth], stack[depth-1], inv_masks[b]);
+			if(!stack[depth].zero())
 			{
-				/*
-				if(depth==1)
-					goto done2;
-				depth--;
-				stack[depth].unset(bits[depth]);
-				goto next_loop;
-			}
-			else if(x==nMinCliqueSize)
-			{
-			*/
-				if(x==nMinCliqueSize && !stack[depth].zero())
+				int x = depth+popcnt(stack[depth]);
+				if(x<=nMinCliqueSize)
 				{
-					bigint save = stack[depth];
-					//bigint save = temp;
-					//int rem_bits[MAX_DEPTH];
-					bool fail=false;
-					for(int d=0; d+1<nMinCliqueSize-depth; d++)
+					if(x==nMinCliqueSize)
 					{
-						int pos = stack[depth].trailing_bit();
-//						rem_bits[d]=pos;
-						stack[depth] &= inv_masks[pos];
-						stack[depth].unset(pos);
-//						temp.unset(pos);
-						if(stack[depth].zero())
+						bigint save = stack[depth];
+						bool fail=false;
+						for(int d=0; d+1<nMinCliqueSize-depth; d++)
 						{
-							fail=true;
-							break;
+							int pos = stack[depth].trailing_bit();
+							stack[depth] &= inv_masks[pos];
+							stack[depth].unset(pos);
+							if(stack[depth].zero())
+							{
+								fail=true;
+								break;
+							}
+						}
+						if(!fail)
+						{
+							bigint current_clique=v_curr_cl[depth-1];
+							current_clique.set(bits[depth-1]);
+							current_clique|=save;
+							current_clique.popcnt=nMinCliqueSize+1;
+							clique_counts[color][nMinCliqueSize]++;
+							if(nMinCliqueSize==kmax)
+								return false;
+							v.push_back(current_clique);
 						}
 					}
-//					if(stack[depth].zero())
-//						fail=true;
-					/*
-					int pos = temp.trailing_bit();
-					rem_bits[nMinCliqueSize-depth-1]=pos;
-					
-					int fail=0;
-					for(int i=0; i<nMinCliqueSize-depth-1; i++)
-						for(int j=i+1; j<nMinCliqueSize-depth; j++)
-						{
-							if(!in_mask.bit(abs(rem_bits[i]-rem_bits[j])-1))
-								fail++;
-						}
-					
-					if((fail==0) != (!stack[depth].zero()))
-					{
-						printf("depth=%d nMinCliqueSize=%d\n", depth, nMinCliqueSize);
-						save.set_len(MAX_LEN*64);
-						save.printbits();
-						stack[depth].printbits();
-						in_mask.printbits();
-						printf("fail %d, zero() %d\n", fail);
-						exit(-1);
-					}
-					
-					//if(!stack[depth].zero())
-					if(fail==0)
-					*/
-					if(!fail)
-					{
-						bigint current_clique=v_curr_cl[depth-1];
-						current_clique.set(bits[depth-1]);
-						current_clique|=save;
-						current_clique.popcnt=nMinCliqueSize+1;
-						clique_counts[color][nMinCliqueSize]++;
-						if(nMinCliqueSize==kmax)
-							return false;
-						v.push_back(current_clique);
-					}
+					if(depth==1)
+						goto done2;
+					depth--;
+					stack[depth].unset(bits[depth]);
 				}
-				if(depth==1)
-					goto done2;
-				depth--;
-				stack[depth].unset(bits[depth]);
-				goto next_loop;
-			}
-			
-			bits[depth]=bits[depth-1]-1;
-			v_curr_cl[depth]=v_curr_cl[depth-1];
-			v_curr_cl[depth].set(bits[depth-1]);
-				//stack[depth].clear();
-			if(depth+1>=nMinCliqueSize)
-			{
-				//printf("x %llx %llx, cls %d\n", x.n[0], x.n[1], cls);
-				if(!stack[depth].zero())
+				else
 				{
-					if(depth+1>=kmax)
-						return false;
-					bigint x=stack[depth];
-					uint64_t cls = popcnt(x);
-					uint64_t pos = v.size();
-					v.resize(pos+cls);
-					bigint y = x;
-					bigint current_clique=v_curr_cl[depth];
-					/*
-					current_clique.clear();
-					current_clique.set_len(lastbit+1);
-					current_clique.set(new_bit);
-					current_clique.set(b0);
-					for(uint64_t i=1; i<depth; i++)
-						current_clique.set(bits[i]);
-					*/
-					current_clique.popcnt=depth+1;
-
-					for(uint64_t i=0; i<cls; i++)
+//					bits[depth]=bits[depth-1]-1;
+					v_curr_cl[depth]=v_curr_cl[depth-1];
+					v_curr_cl[depth].set(b);
+						//stack[depth].clear();
+					if(depth+1>=nMinCliqueSize)
 					{
-						bigint& t = v[i+pos];
-						t = current_clique;
-						t.popcnt+=1;
-						int b = y.trailing_bit();
-						t.set(b);
-						y.unset(b);
-					//	printf("   ");t.printbits();
-					}
-					clique_counts[color][depth+1]+=cls;
-				
-					if(new_bit < bits[0])
-					{
-						v.resize(pos+cls*2);
+						if(depth+1>=kmax)
+							return false;
+						bigint x=stack[depth];
+						uint64_t cls = popcnt(x);
+						uint64_t pos = v.size();
+						v.resize(pos+cls);
 						bigint y = x;
+						bigint current_clique=v_curr_cl[depth];
+						current_clique.popcnt=depth+1;
+
 						for(uint64_t i=0; i<cls; i++)
 						{
-							bigint& t = v[i+pos+cls];
-							t.clear();
-							bigint y = v[i+pos];
-							y.set_len(bits[0]);
-							invert(t, y);
-							t.set(bits[0]);
-							t.popcnt=depth+2;
-							t.set_len(bits[0]+1);
+							bigint& t = v[i+pos];
+							t = current_clique;
+							t.popcnt+=1;
+							int b = y.trailing_bit();
+							t.set(b);
+							y.unset(b);
 						}
 						clique_counts[color][depth+1]+=cls;
+				
+						if(new_bit < bits[0])
+						{
+							v.resize(pos+cls*2);
+							bigint y = x;
+							for(uint64_t i=0; i<cls; i++)
+							{
+								bigint& t = v[i+pos+cls];
+								t.clear();
+								bigint y = v[i+pos];
+								y.set_len(bits[0]);
+								invert(t, y);
+								t.set(bits[0]);
+								t.popcnt=depth+2;
+								t.set_len(bits[0]+1);
+							}
+							clique_counts[color][depth+1]+=cls;
+						}						
 					}
 				}
 			}
-		next_loop:
+		
 			while(stack[depth].zero())
 			{
 				if(depth==1)
@@ -818,6 +781,8 @@ bool graph::set_bit(int color, int new_bit, int kmax[2], bool exact, bigint* bad
 
 	check_first_unset_bit();
 	int nMinCliqueSize=kmax[color]-2;
+	if(nMinCliqueSize<1)
+		nMinCliqueSize=1;
 	/*
 	if(kmax[color]<6 && kmax[1-color]<6)
 	{
@@ -911,52 +876,29 @@ bool build_graph3(graph& gOut, const bigint2& mask, int kmax[2])
 
 	obj.nMaxUnset=0;
 
-	//bigint inverted_masks[2][MAX_LEN*64];
-	align16 uint64_t inverted_masks[2][MAX_LEN*64*2];
-	int max_bit = max(mask.first.trailing_bit(), mask.second.trailing_bit())+1;
-	if(max_bit>MAX_LEN*64)
-		max_bit=MAX_LEN*64;
-	for(i=0; i<max_bit; i++)
-	{
-		bigint m;
-		invert(m, mask.first, i);
-		inverted_masks[0][i*2+0]=m.n[0];
-		inverted_masks[0][i*2+1]=m.n[1];
-		invert(m, mask.second, i);
-		inverted_masks[1][i*2+0]=m.n[0];
-		inverted_masks[1][i*2+1]=m.n[1];
-	}
-
-	int true_len = 0;
-
 	for(int pos=1; pos<=nSetBits; pos++)
 	{
 		int color;
-		if(mask.first.bit(gOut.n-1))
+		if(mask.first.bit(pos))
 			color=0;
-		else if(mask.second.bit(gOut.n-1))
+		else if(mask.second.bit(pos))
 			color=1;
 		else
 		{
-			if(true_len==0)
-				true_len = gOut.n;
-			gOut.mask0.set_len(gOut.mask.len+1);
-			gOut.mask.set_len(gOut.mask.len+1);
-			gOut.n++;
 			continue;
 		}
-		gOut.mask0.set_len(gOut.mask.len+1);
-		gOut.mask.set_len(gOut.mask.len+1);
 		if(color)
-			gOut.mask.set(gOut.n-1);
+			gOut.mask.set(pos);
 		else
-			gOut.mask0.set(gOut.n-1);
+			gOut.mask0.set(pos);
 		obj._m0 = gOut.mask0;
 		obj._m1 = gOut.mask;
 
-		obj.new_bit = gOut.n-1;
-		obj.lastbit = gOut.n-1;
+		obj.new_bit = pos;
+		obj.lastbit = pos;
 		obj.nMinCliqueSize=kmax[color]-2;
+		if(obj.nMinCliqueSize<1)
+			obj.nMinCliqueSize=1;
 		obj.prepare(kmax, color, true);
 		if(!obj.unrolled_flat_search())
 			return false;
@@ -965,8 +907,9 @@ bool build_graph3(graph& gOut, const bigint2& mask, int kmax[2])
 			return false;
 	}
 
-	if(true_len == 0)
-		true_len = nSetBits+1;
+	int true_len = nSetBits+1;
+	gOut.mask0.set_len(true_len);
+	gOut.mask.set_len(true_len);
 	gOut.n = true_len+1;
 	gOut.check_first_unset_bit();
 	return true;
