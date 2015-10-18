@@ -3,8 +3,14 @@
 #include <emmintrin.h>
 #include <immintrin.h>
 
-#define MAX_DEPTH 12
-#define MAX_LEN 4
+#define MAX_DEPTH 16
+// Set to maximum graph length, in units of 64 (e.g. 6 allows graphs up to order 384).
+// Must be an even number.
+// Operations on shorter graphs are faster (but the code will automatically use 128-bit or 256-bit ops when possible, 
+// so performance impact is relatively low)
+#define GRAPH_MAX_LEN 4
+
+
 #ifdef WIN32
 typedef unsigned __int64 uint64_t;
 typedef signed __int64 int64_t;
@@ -98,7 +104,7 @@ inline __m128i shift_left(__m128i x, int y)
 	}
 }
 
-
+template <int MAX_LEN>
 struct bare_bigint
 {
 	uint64_t n[MAX_LEN];
@@ -110,6 +116,7 @@ struct bare_bigint
 	}
 	void set(int x) { n[x>>6] |= One<<(x&63); }
 	void unset(int x) { n[x>>6] &= ~(One<<(x&63)); }
+	void flip(int x) { if(bit(x)) unset(x); else set(x); }
 
 	void unset_from(int x)
 	{
@@ -120,6 +127,14 @@ struct bare_bigint
 		n[qw] &= (One<<fract)-One;
 		for(int i=qw+1; i<MAX_LEN; i++)
 			n[i]=0;
+	}
+	void unset_to(int x)
+	{
+		int qw = x >> 6;
+		int fract = x & 63;
+		for(int i=0; i<qw; i++)
+			n[i]=0;
+		n[qw] &= ~((One<<fract)-One);
 	}
 
 	int bit(int x) const { return (n[x>>6] >> (x&63)) & 1; }
@@ -135,17 +150,7 @@ struct bare_bigint
 		}
 	}
 
-	bool zero() const 
-	{
-#if MAX_LEN==2
-		return ((n[0]|n[1])==0);
-#else
-		for(int k=0; k<MAX_LEN; k++)
-			if(n[k]!=0)
-				return false;
-		return true;
-#endif
-	}
+	bool zero() const;
 
 	int leading_bit() const
 	{
@@ -183,58 +188,70 @@ struct bare_bigint
 
 	void operator>>=(int x)
 	{
-#if MAX_LEN==2
-		n[0] = (n[0]>>x) | (n[1]<<(64-x));
-		n[1] >>= x;
-#else
-		for(int i=0; i<MAX_LEN; i++)
+		if(MAX_LEN==2)
 		{
-			if(i>0)
-				n[i-1] |= n[i]<<(64-x);
-			n[i] >>= x;
+			n[0] = (n[0]>>x) | (n[1]<<(64-x));
+			n[1] >>= x;
 		}
-#endif	
+		else
+		{
+			for(int i=0; i<MAX_LEN; i++)
+			{
+				if(i>0)
+					n[i-1] |= n[i]<<(64-x);
+				n[i] >>= x;
+			}
+		}
 	}
 	void operator|=(const bare_bigint& x)
 	{
-#if MAX_LEN==2
-		n[0]|=x.n[0];
-		n[1]|=x.n[1];
-#else
-		for(int i=0; i<MAX_LEN; i++)
-			n[i]|=x.n[i];
-#endif
+		if(MAX_LEN==2)
+		{
+			n[0]|=x.n[0];
+			n[1]|=x.n[1];
+		}
+		else
+		{
+			for(int i=0; i<MAX_LEN; i++)
+				n[i]|=x.n[i];
+		}
 	}
 	void operator&=(const bare_bigint& x)
 	{
-#if MAX_LEN==2
-		n[0]&=x.n[0];
-		n[1]&=x.n[1];
-#else
-		for(int i=0; i<MAX_LEN; i++)
-			n[i]&=x.n[i];
-#endif
+		if(MAX_LEN==2)
+		{
+			n[0]&=x.n[0];
+			n[1]&=x.n[1];
+		}
+		else
+		{
+			for(int i=0; i<MAX_LEN; i++)
+				n[i]&=x.n[i];
+		}
 	}
 
 	int trailing_bit() const
 	{
-#if MAX_LEN==2
-		int byte = (n[1]!=0 ? 1 : 0);
-		unsigned long x;
-		_BitScanReverse64(&x, n[byte]);
-		return x+byte*64;
-#else
-		int i=0;
-		for(i=MAX_LEN-1; i>=0; i--)
+		if(MAX_LEN==2)
 		{
-			if(n[i]!=0)
+			int byte = (n[1]!=0 ? 1 : 0);
+			unsigned long x;
+			_BitScanReverse64(&x, n[byte]);
+			return x+byte*64;
+		}
+		else
+		{
+			int i=0;
+			for(i=MAX_LEN-1; i>=0; i--)
 			{
-				unsigned long x;
-				_BitScanReverse64(&x, n[i]);
-				return x+i*64;
+				if(n[i]!=0)
+				{
+					unsigned long x;
+					_BitScanReverse64(&x, n[i]);
+					return x+i*64;
+				}
 			}
 		}
-#endif
 		return 0;
 	}
 	void neg()
@@ -273,21 +290,53 @@ struct bare_bigint
 	}
 
 
+	template <int Y>
+	bare_bigint& operator=(const bare_bigint<Y>& y)
+	{
+		int i;
+		for(i=0; i<MAX_LEN && i<Y; i++)
+			n[i] = y.n[i];
+		for(; i<MAX_LEN; i++)
+			n[i]=0;
+		return *this;
+	}
 };
 
-struct bigint: bare_bigint
+
+template <>
+bool bare_bigint<2>::zero() const
 {
+	return ((n[0]|n[1])==0);
+}
+
+template <>
+bool bare_bigint<4>::zero() const
+{
+	return ((n[0]|n[1]|n[2]|n[3])==0);
+}
+
+template<int MAX_LEN>
+bool bare_bigint<MAX_LEN>::zero() const
+{
+	for(int k=0; k<MAX_LEN; k++)
+		if(n[k]!=0)
+			return false;
+	return true;
+}
+
+
+template <int MAX_LEN>
+struct ext_bigint: bare_bigint<MAX_LEN>
+{
+	uint64_t padding;
 	int len;
 	int popcnt;
-#if !(MAX_LEN & 1)
-	uint64_t padding;
-#endif
 	void set_len(int x) { len=x; }
-	bigint()
+	ext_bigint()
 	{
 //		popcnt=0;
 	}
-	bigint(const bare_bigint& x)
+	ext_bigint(const bare_bigint& x)
 	{
 		for(int i=0; i<MAX_LEN; i++)
 			n[i]=x.n[i];
@@ -305,13 +354,13 @@ struct bigint: bare_bigint
 	void printbits() const
 	{
 		printf("(%d/%d) ", popcnt, len);
-		for(int k=0; k<=len; k++)
+		for(int k=0; k<MAX_LEN*64; k++)
 			if(bit(k))
 				printf("%d ", k);
 		printf("\n");
 	}
 
-	bool operator==(const bigint& x) const
+	bool operator==(const ext_bigint& x) const
 	{
 		if(len!=x.len)
 			return false;
@@ -320,150 +369,225 @@ struct bigint: bare_bigint
 				return false;
 		return true;
 	}
-	bool operator<(const bigint& x) const
-	{
-		if(n[0]!=x.n[0])
-			return n[0]<x.n[0];
-		return n[1]<x.n[1];
-	}
+	bool operator<(const ext_bigint& x) const;
 	void clear()
 	{
 		len=popcnt=0;
 		for(int k=0; k<MAX_LEN; k++)
 			n[k]=0;
 	}
+
+	template <int Y>
+	ext_bigint& operator=(const ext_bigint<Y>& y)
+	{
+
+		clear();
+		set_len(y.len);
+		popcnt = y.popcnt;
+		for(int i=0; i<MAX_LEN && i<Y; i++)
+			n[i] = y.n[i];
+		return *this;
+	}
+	void flip2(int x) 
+	{
+		flip(x);
+		if(len-1-x!=x)
+			flip(len-1-x);
+	}
 };
 
-inline void store_and(bare_bigint& dst, const bare_bigint& src_a, const bare_bigint& src_b)
+template <int T>
+bool ext_bigint<T>::operator<(const ext_bigint<T>& x) const
 {
-#if MAX_LEN==2
+	if(T==6)
+	{
+		if(n[0]!=x.n[0])
+			return n[0]<x.n[0];
+		if(n[1]!=x.n[1])
+			return n[1]<x.n[1];
+		if(n[2]!=x.n[2])
+			return n[2]<x.n[2];
+		if(n[3]!=x.n[3])
+			return n[3]<x.n[3];
+		if(n[4]!=x.n[4])
+			return n[4]<x.n[4];
+		return n[5]<x.n[5];
+	}
+	else
+	{
+		exit(-1);
+		return false;
+	}
+}
+
+template <>
+bool ext_bigint<2>::operator<(const ext_bigint<2>& x) const
+{
+	if(n[0]!=x.n[0])
+		return n[0]<x.n[0];
+	return n[1]<x.n[1];
+}
+
+template <>
+bool ext_bigint<4>::operator<(const ext_bigint<4>& x) const
+{
+	if(n[0]!=x.n[0])
+		return n[0]<x.n[0];
+	if(n[1]!=x.n[1])
+		return n[1]<x.n[1];
+	if(n[2]!=x.n[2])
+		return n[2]<x.n[2];
+	return n[3]<x.n[3];
+}
+
+template<int T>
+inline void store_and(bare_bigint<T>& dst, const bare_bigint<T>& src_a, const bare_bigint<T>& src_b)
+{
+	for(int i=0; i<T; i++)
+		dst.n[i] = src_a.n[i] & src_b.n[i];
+}
+
+template<>
+inline void store_and(bare_bigint<2>& dst, const bare_bigint<2>& src_a, const bare_bigint<2>& src_b)
+{
 	__m128i a = _mm_load_si128((const __m128i*)&src_a.n[0]);
 	__m128i b = _mm_load_si128((const __m128i*)&src_b.n[0]);
 	_mm_store_si128((__m128i*)(&dst.n[0]), _mm_and_si128(a, b));
-#else
-	for(int i=0; i<MAX_LEN; i++)
-		dst.n[i] = src_a.n[i] & src_b.n[i];
-#endif
 }
 
-inline bool bit_equal(const bigint& a, const bigint& b)
+
+template <int T>
+inline bool bit_equal(const bare_bigint<T>& a, const bare_bigint<T>& b)
 {
-#if MAX_LEN==2
-	return (a.n[0]==b.n[0] && a.n[1]==b.n[1]);
-#else
 	int i;
-	for(i=0; i<MAX_LEN; i++)
+	for(i=0; i<T; i++)
 		if(a.n[i]!=b.n[i])
 			return false;
 	return true;
-#endif
 }
+
+template <>
+inline bool bit_equal(const bare_bigint<2>& a, const bare_bigint<2>& b)
+{
+	return (a.n[0]==b.n[0] && a.n[1]==b.n[1]);
+}
+
+
+template <int T>
+inline bool bit_equal(const ext_bigint<T>& a, const ext_bigint<T>& b)
+{
+	int i;
+	for(i=0; i<T; i++)
+		if(a.n[i]!=b.n[i])
+			return false;
+	return true;
+}
+
+template <>
+inline bool bit_equal(const ext_bigint<2>& a, const ext_bigint<2>& b)
+{
+	return (a.n[0]==b.n[0] && a.n[1]==b.n[1]);
+}
+
+
+typedef ext_bigint<GRAPH_MAX_LEN> bigint;
 
 typedef pair<bigint,bigint> bigint2;
 
+typedef ext_bigint<2> b128;
 
-inline uint64_t popcnt(const bare_bigint& a)
+
+template<int T>
+inline uint64_t popcnt(const bare_bigint<T>& a)
 {
 	uint64_t sum=0;
-	for(int k=0; k<MAX_LEN; k++)
+	for(int k=0; k<T; k++)
 		sum += __popcnt64(a.n[k]);
 	return sum;
 }
 
-inline bare_bigint andnot(const bare_bigint& a, const bare_bigint& b)
+template <int T>
+inline bare_bigint<T> andnot(const bare_bigint<T>& a, const bare_bigint<T>& b)
 {
-	bare_bigint x;
-	for(int k=0; k<MAX_LEN; k++)
+	bare_bigint<T> x;
+	for(int k=0; k<T; k++)
 		x.n[k] = a.n[k] & ~b.n[k];
 	return x;
 }
 
-inline uint64_t popcnt(const bare_bigint& a, const bare_bigint& b)
+template <int T>
+inline uint64_t popcnt(const bare_bigint<T>& a, const bare_bigint<T>& b)
 {
 	uint64_t sum=0;
-#if MAX_LEN==1
-	sum = __popcnt64(a.n[0] & b.n[0]);
-#elif MAX_LEN==2
-	sum = __popcnt64(a.n[0] & b.n[0])
-		+ __popcnt64(a.n[1] & b.n[1]);
-#elif MAX_LEN==3
-	sum = __popcnt64(a.n[0] & b.n[0])
-		+ __popcnt64(a.n[1] & b.n[1])
-		+ __popcnt64(a.n[2] & b.n[2]);
-#else
-	for(int k=0; k<MAX_LEN; k++)
-		sum += __popcnt64(a.n[k] & b.n[k]);
-#endif
+	if(T==1)
+		sum = __popcnt64(a.n[0] & b.n[0]);
+	else if(T==2)
+		sum = __popcnt64(a.n[0] & b.n[0])
+			+ __popcnt64(a.n[1] & b.n[1]);
+	else if(T==3)
+		sum = __popcnt64(a.n[0] & b.n[0])
+			+ __popcnt64(a.n[1] & b.n[1])
+			+ __popcnt64(a.n[2] & b.n[2]);
+	else
+		for(int k=0; k<T; k++)
+			sum += __popcnt64(a.n[k] & b.n[k]);
 	return sum;
 }
 
 
-
-inline bool pattern_match(const bigint& a, const bigint& b)
+template<int MAX_LEN>
+inline ext_bigint<MAX_LEN> operator|(ext_bigint<MAX_LEN> a, ext_bigint<MAX_LEN> b)
 {
-#if MAX_LEN==2
-	//return ((a.n[0] & b.n[0]) == a.n[0])
-	//	&& ((a.n[1] & b.n[1]) == a.n[1]);
-	
-	__m128i m0 = _mm_loadu_si128((const __m128i*)&a.n[0]);
-	__m128i m1 = _mm_loadu_si128((const __m128i*)&b.n[0]);
-	__m128i m2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,m1));
-	return (_mm_movemask_epi8(m2) == 65535);
-	
-#elif MAX_LEN==4
-	__m128i m0 = _mm_andnot_si128(_mm_loadu_si128((const __m128i*)&b.n[0]), _mm_loadu_si128((const __m128i*)&a.n[0]));
-	m0 = _mm_or_si128(m0, _mm_andnot_si128(_mm_loadu_si128((const __m128i*)&b.n[2]), _mm_loadu_si128((const __m128i*)&a.n[2])));
-	m0 = _mm_cmpeq_epi16(m0, _mm_setzero_si128());
-	return (_mm_movemask_epi8(m0) == 65535);
-		
-#else
-	bool ok = true;
-	uint64_t mismatch = 0;
-	for(int i=0; i<MAX_LEN; i++)
-	{
-//		if((a.n[i] & b.n[i]) != a.n[i])
-//			return false;
-		mismatch |= a.n[i] & ~b.n[i];
-	}
-	return (mismatch==0);
-#endif
-}
-
-inline bigint operator|(bigint a, bigint b)
-{
-#if MAX_LEN==2
-	a.n[0]|=b.n[0];
-	a.n[1]|=b.n[1];
-#else
 	for(int i=0; i<MAX_LEN; i++)
 		a.n[i] |= b.n[i];
-#endif
 	return a;
 }
 
-inline bigint operator&(bigint a, bigint b)
+template<int MAX_LEN>
+inline ext_bigint<MAX_LEN> operator^(ext_bigint<MAX_LEN> a, ext_bigint<MAX_LEN> b)
 {
-#if MAX_LEN==2
-	a.n[0]&=b.n[0];
-	a.n[1]&=b.n[1];
-#else
+	for(int i=0; i<MAX_LEN; i++)
+		a.n[i] ^= b.n[i];
+	return a;
+}
+
+
+template<int MAX_LEN>
+inline ext_bigint<MAX_LEN> operator&(ext_bigint<MAX_LEN> a, ext_bigint<MAX_LEN> b)
+{
 	for(int i=0; i<MAX_LEN; i++)
 		a.n[i] &= b.n[i];
-#endif
 	return a;
 }
 
-inline bigint operator<<(bigint x, int n)
+template<>
+inline ext_bigint<2> operator|(ext_bigint<2> a, ext_bigint<2> b)
 {
-	bigint retval;
-#if MAX_LEN==2
-	retval.set_len(x.len);
-	retval.popcnt = x.popcnt;
-	__m128i m = _mm_loadu_si128((const __m128i*)&x.n[0]);
-	m = shift_left(m, n);
-	_mm_storeu_si128((__m128i*)&retval.n[0], m);
+	a.n[0]|=b.n[0];
+	a.n[1]|=b.n[1];
+	return a;
+}
 
-#else
+template<>
+inline ext_bigint<2> operator^(ext_bigint<2> a, ext_bigint<2> b)
+{
+	a.n[0]^=b.n[0];
+	a.n[1]^=b.n[1];
+	return a;
+}
+
+template<>
+inline ext_bigint<2> operator&(ext_bigint<2> a, ext_bigint<2> b)
+{
+	a.n[0]&=b.n[0];
+	a.n[1]&=b.n[1];
+	return a;
+}
+
+template<int MAX_LEN>
+inline ext_bigint<MAX_LEN> operator<<(ext_bigint<MAX_LEN> x, int n)
+{
+	ext_bigint<MAX_LEN> retval;
 	int i;
 	retval.clear();
 	retval.set_len(x.len);
@@ -484,13 +608,27 @@ inline bigint operator<<(bigint x, int n)
 		for(i=0; i+qw_n<MAX_LEN; i++)
 			retval.n[i+qw_n] = x.n[i];
 	}
-#endif
 	return retval;
 }
 
-inline bigint operator>>(bigint x, int n)
+
+template<>
+inline ext_bigint<2> operator<<(ext_bigint<2> x, int n)
 {
-	bigint retval;
+	ext_bigint<2> retval;
+	retval.set_len(x.len);
+	retval.popcnt = x.popcnt;
+	__m128i m = _mm_loadu_si128((const __m128i*)&x.n[0]);
+	m = shift_left(m, n);
+	_mm_storeu_si128((__m128i*)&retval.n[0], m);
+	return retval;
+}
+
+
+template<int MAX_LEN>
+inline ext_bigint<MAX_LEN> operator>>(ext_bigint<MAX_LEN> x, int n)
+{
+	ext_bigint<MAX_LEN> retval;
 	int i;
 	retval.clear();
 	retval.set_len(x.len);
@@ -514,273 +652,20 @@ inline bigint operator>>(bigint x, int n)
 	return retval;
 }
 
-
-inline bool pattern_match(const bigint& a, const bigint& b, int shift)
-{ 
-#if MAX_LEN==2
-	__m128i m0 = _mm_loadu_si128((const __m128i*)&a.n[0]);
-	__m128i m1 = _mm_loadu_si128((const __m128i*)&b.n[0]);
-	int shift_save = shift;
-	if(shift >= 64)
-	{
-		m0 = _mm_unpacklo_epi64(_mm_setzero_si128(), m0);
-		shift &= 63;
-	}
-	if(shift != 0)
-	{
-		m0 = _mm_or_si128(_mm_slli_epi64(m0, shift), _mm_unpacklo_epi64(_mm_setzero_si128(), _mm_srli_epi64(m0, 64-shift)));
-	}
-	__m128i m2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,m1));
-	bool retval = (_mm_movemask_epi8(m2) == 65535);
-	return retval;
-#else
-	return pattern_match(a<<shift, b);
-#endif
-}
-
-inline int inv_batch_pattern_match(const bigint& a, const bigint* pb)
-{
-#if MAX_LEN==2
-	__m128i m0 = _mm_loadu_si128((const __m128i*)&a.n[0]);
-	
-	__m128i r0 = _mm_loadu_si128((const __m128i*)&pb[0].n[0]);
-	__m128i r1 = _mm_loadu_si128((const __m128i*)&pb[1].n[0]);
-	__m128i r2 = _mm_loadu_si128((const __m128i*)&pb[2].n[0]);
-	__m128i r3 = _mm_loadu_si128((const __m128i*)&pb[3].n[0]);
-	r0 = _mm_cmpeq_epi64(r0, _mm_and_si128(m0,r0));
-	r1 = _mm_cmpeq_epi64(r1, _mm_and_si128(m0,r1));
-	r2 = _mm_cmpeq_epi64(r2, _mm_and_si128(m0,r2));
-	r3 = _mm_cmpeq_epi64(r3, _mm_and_si128(m0,r3));
-	r0 = _mm_packs_epi32(r0, r1);
-	r2 = _mm_packs_epi32(r2, r3);
-
-	__m128i r4 = _mm_loadu_si128((const __m128i*)&pb[4].n[0]);
-	__m128i r5 = _mm_loadu_si128((const __m128i*)&pb[5].n[0]);
-	__m128i r6 = _mm_loadu_si128((const __m128i*)&pb[6].n[0]);
-	__m128i r7 = _mm_loadu_si128((const __m128i*)&pb[7].n[0]);
-	r4 = _mm_cmpeq_epi64(r4, _mm_and_si128(m0,r4));
-	r5 = _mm_cmpeq_epi64(r5, _mm_and_si128(m0,r5));
-	r6 = _mm_cmpeq_epi64(r6, _mm_and_si128(m0,r6));
-	r7 = _mm_cmpeq_epi64(r7, _mm_and_si128(m0,r7));
-	r4 = _mm_packs_epi32(r4, r5);
-	r6 = _mm_packs_epi32(r6, r7);
-
-	r0 = _mm_packs_epi32(r0, r2);
-	r4 = _mm_packs_epi32(r4, r6);
-	r0 = _mm_packs_epi16(r0, r4);
-
-	__m128i s0 = r0;
-	pb+=8;
-	r0 = _mm_loadu_si128((const __m128i*)&pb[0].n[0]);
-	r1 = _mm_loadu_si128((const __m128i*)&pb[1].n[0]);
-	r2 = _mm_loadu_si128((const __m128i*)&pb[2].n[0]);
-	r3 = _mm_loadu_si128((const __m128i*)&pb[3].n[0]);
-	r0 = _mm_cmpeq_epi64(r0, _mm_and_si128(m0,r0));
-	r1 = _mm_cmpeq_epi64(r1, _mm_and_si128(m0,r1));
-	r2 = _mm_cmpeq_epi64(r2, _mm_and_si128(m0,r2));
-	r3 = _mm_cmpeq_epi64(r3, _mm_and_si128(m0,r3));
-	r0 = _mm_packs_epi32(r0, r1);
-	r2 = _mm_packs_epi32(r2, r3);
-
-	r4 = _mm_loadu_si128((const __m128i*)&pb[4].n[0]);
-	r5 = _mm_loadu_si128((const __m128i*)&pb[5].n[0]);
-	r6 = _mm_loadu_si128((const __m128i*)&pb[6].n[0]);
-	r7 = _mm_loadu_si128((const __m128i*)&pb[7].n[0]);
-	r4 = _mm_cmpeq_epi64(r4, _mm_and_si128(m0,r4));
-	r5 = _mm_cmpeq_epi64(r5, _mm_and_si128(m0,r5));
-	r6 = _mm_cmpeq_epi64(r6, _mm_and_si128(m0,r6));
-	r7 = _mm_cmpeq_epi64(r7, _mm_and_si128(m0,r7));
-	r4 = _mm_packs_epi32(r4, r5);
-	r6 = _mm_packs_epi32(r6, r7);
-
-	r0 = _mm_packs_epi32(r0, r2);
-	r4 = _mm_packs_epi32(r4, r6);
-	r0 = _mm_packs_epi16(r0, r4);
-	r0 = _mm_packs_epi16(s0, r0);
-	__m128i rsave = r0;
-	__m128i mm_ones=_mm_cmpeq_epi8(r0, r0);
-	r0 = _mm_cmpeq_epi8(r0, mm_ones);
-	int retval = _mm_movemask_epi8(r0);
-//	int retval = _mm_movemask_epi8(r0);
-	return retval;
-#else
-	int retval=0;
-	for(int i=0; i<16; i++)
-		retval |= (pattern_match(pb[i],a) << i);
-	return retval;
-#endif
-}
-
-inline int batch_pattern_match(const bigint& a, const bigint* pb)
-{
-#if MAX_LEN==2
-	__m128i m0 = _mm_loadu_si128((const __m128i*)&a.n[0]);
-	
-	__m128i r0 = _mm_loadu_si128((const __m128i*)&pb[0].n[0]);
-	__m128i r1 = _mm_loadu_si128((const __m128i*)&pb[1].n[0]);
-	__m128i r2 = _mm_loadu_si128((const __m128i*)&pb[2].n[0]);
-	__m128i r3 = _mm_loadu_si128((const __m128i*)&pb[3].n[0]);
-	r0 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r0));
-	r1 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r1));
-	r2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r2));
-	r3 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r3));
-	r0 = _mm_packs_epi32(r0, r1);
-	r2 = _mm_packs_epi32(r2, r3);
-
-	__m128i r4 = _mm_loadu_si128((const __m128i*)&pb[4].n[0]);
-	__m128i r5 = _mm_loadu_si128((const __m128i*)&pb[5].n[0]);
-	__m128i r6 = _mm_loadu_si128((const __m128i*)&pb[6].n[0]);
-	__m128i r7 = _mm_loadu_si128((const __m128i*)&pb[7].n[0]);
-	r4 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r4));
-	r5 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r5));
-	r6 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r6));
-	r7 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r7));
-	r4 = _mm_packs_epi32(r4, r5);
-	r6 = _mm_packs_epi32(r6, r7);
-
-	r0 = _mm_packs_epi32(r0, r2);
-	r4 = _mm_packs_epi32(r4, r6);
-	r0 = _mm_packs_epi16(r0, r4);
-
-	__m128i s0 = r0;
-	pb+=8;
-	r0 = _mm_loadu_si128((const __m128i*)&pb[0].n[0]);
-	r1 = _mm_loadu_si128((const __m128i*)&pb[1].n[0]);
-	r2 = _mm_loadu_si128((const __m128i*)&pb[2].n[0]);
-	r3 = _mm_loadu_si128((const __m128i*)&pb[3].n[0]);
-	r0 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r0));
-	r1 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r1));
-	r2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r2));
-	r3 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r3));
-	r0 = _mm_packs_epi32(r0, r1);
-	r2 = _mm_packs_epi32(r2, r3);
-
-	r4 = _mm_loadu_si128((const __m128i*)&pb[4].n[0]);
-	r5 = _mm_loadu_si128((const __m128i*)&pb[5].n[0]);
-	r6 = _mm_loadu_si128((const __m128i*)&pb[6].n[0]);
-	r7 = _mm_loadu_si128((const __m128i*)&pb[7].n[0]);
-	r4 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r4));
-	r5 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r5));
-	r6 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r6));
-	r7 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r7));
-	r4 = _mm_packs_epi32(r4, r5);
-	r6 = _mm_packs_epi32(r6, r7);
-
-	r0 = _mm_packs_epi32(r0, r2);
-	r4 = _mm_packs_epi32(r4, r6);
-	r0 = _mm_packs_epi16(r0, r4);
-	r0 = _mm_packs_epi16(s0, r0);
-	__m128i rsave = r0;
-	__m128i mm_ones=_mm_cmpeq_epi8(r0, r0);
-	r0 = _mm_cmpeq_epi8(r0, mm_ones);
-	int retval = _mm_movemask_epi8(r0);
-//	int retval = _mm_movemask_epi8(r0);
-	return retval;
-	/*
-	pb-=8;
-	int check=0;
-	for(int i=0; i<16; i++)
-		check |= (pattern_match(a,pb[i]) << i);
-	if(check != retval)
-	{
-		printf("%x %x\n", check, retval);
-		print(rsave);
-		print(r0);
-
-		exit(-1);
-	}
-	return retval;
-*/
-#else
-	int retval=0;
-	for(int i=0; i<16; i++)
-		retval |= (pattern_match(a,pb[i]) << i);
-	return retval;
-#endif
-}
-
-inline int batch_pattern_match_2(const bigint& a, const bigint* pb)
-{
-#if MAX_LEN==2
-	__m128i m0 = _mm_loadu_si128((const __m128i*)&a.n[0]);
-	//m0 = _mm_srli_si128(m0, shift);
-//	m0 = _mm_alignr_epi8(_mm_setzero_si128(), m0, shift);
-	__m128i m0_ = _mm_srli_si128(m0,1);
-
-//	__m128i m04 = _mm_or_si128(_mm_srli_epi64(m0,4), _mm_srli_si128(_mm_slli_epi64(m0, 60), 8));
-//	__m128i m04_ = _mm_or_si128(_mm_srli_epi64(m0_,4), _mm_srli_si128(_mm_slli_epi64(m0_, 60), 8));
-
-
-	__m128i r0 = _mm_loadu_si128((const __m128i*)&pb[0].n[0]);
-	__m128i r1 = _mm_loadu_si128((const __m128i*)&pb[1].n[0]);
-	__m128i r2 = _mm_loadu_si128((const __m128i*)&pb[2].n[0]);
-	__m128i r3 = _mm_loadu_si128((const __m128i*)&pb[3].n[0]);
-
-	__m128i b0 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r0));
-	__m128i b0_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r0));
-	__m128i b1 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r1));
-	__m128i b1_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r1));
-	__m128i b2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r2));
-	__m128i b2_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r2));
-	__m128i b3 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r3));
-	__m128i b3_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r3));
-	b0 = _mm_packs_epi32(b0, b1);
-	b2 = _mm_packs_epi32(b2, b3);
-	b0_ = _mm_packs_epi32(b0_, b1_);
-	b2_ = _mm_packs_epi32(b2_, b3_);
-	__m128i dword0 = _mm_packs_epi32(b0, b2);
-	__m128i dword2 = _mm_packs_epi32(b0_, b2_);
-
-
-//	m0 = _mm_or_si128(_mm_srli_epi64(m0,4), _mm_srli_si128(_mm_slli_epi64(m0, 60), 8));
-//	m0_ = _mm_or_si128(_mm_srli_epi64(m0_,4), _mm_srli_si128(_mm_slli_epi64(m0_, 60), 8));
-
-	r0 = _mm_loadu_si128((const __m128i*)&pb[4].n[0]);
-	r1 = _mm_loadu_si128((const __m128i*)&pb[5].n[0]);
-	r2 = _mm_loadu_si128((const __m128i*)&pb[6].n[0]);
-	r3 = _mm_loadu_si128((const __m128i*)&pb[7].n[0]);
-	
-	b0 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r0));
-	b0_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r0));
-	b1 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r1));
-	b1_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r1));
-	b2 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r2));
-	b2_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r2));
-	b3 = _mm_cmpeq_epi64(m0, _mm_and_si128(m0,r3));
-	b3_ = _mm_cmpeq_epi64(m0_, _mm_and_si128(m0_, r3));
-	b0 = _mm_packs_epi32(b0, b1);
-	b2 = _mm_packs_epi32(b2, b3);
-	b0_ = _mm_packs_epi32(b0_, b1_);
-	b2_ = _mm_packs_epi32(b2_, b3_);
-	__m128i dword1 = _mm_packs_epi32(b0, b2);
-	__m128i dword3 = _mm_packs_epi32(b0_, b2_);
-
-	__m128i qword0 = _mm_packs_epi16(dword0, dword1);
-	__m128i qword1 = _mm_packs_epi16(dword2, dword3);
-	__m128i r = _mm_packs_epi16(qword0, qword1);
-
-	__m128i mm_ones=_mm_cmpeq_epi8(r, r);
-	r = _mm_cmpeq_epi8(r, mm_ones);
-	int retval = _mm_movemask_epi8(r);
-//	int retval = _mm_movemask_epi8(r0);
-	return retval;
-#else
-	int retval=0;
-	for(int i=0; i<16; i++)
-		retval |= (pattern_match(a,pb[i]) << i);
-	return retval;
-#endif
-}
-
-inline void invert(bigint& out, const bigint& in)
+template<int MAX_LEN1, int MAX_LEN2>
+inline void invert(ext_bigint<MAX_LEN1>& out, const ext_bigint<MAX_LEN2>& in)
 {
 	out.len = in.len;
 	int k;
-	for(k=0; k<MAX_LEN; k++)
+	for(k=0; k<MAX_LEN1; k++)
 		out.n[k]=0;
 	int shift = in.len & 63;
 	int qw_len = (in.len+63) >> 6;
-	
+	if(qw_len>MAX_LEN1)
+	{
+		printf("Error: invert() overflow\n");
+		exit(-1);
+	}
 	if(shift != 0)
 	{
 		for(k=0; k<qw_len-1; k++)
@@ -803,7 +688,7 @@ inline void invert(bigint& out, const bigint& in)
 		}
 	}
 	out.popcnt = 0;//opcnt(out);
-	for(k=0; k<MAX_LEN; k++)
+	for(k=0; k<MAX_LEN1; k++)
 		out.popcnt += __popcnt64(out.n[k]);
 	/*
 	if(popcnt(out)!=out.popcnt)
@@ -820,305 +705,148 @@ inline void invert(bigint& out, const bigint& in)
 n n-1n-2 ...1   -  1   2
 n-1n-2n-3...0   -  0
 ***/
-inline void invert(bare_bigint& out, const bare_bigint& in, int len)
+template<int MAX_LEN1, int MAX_LEN2>
+inline void invert(bare_bigint<MAX_LEN1>& out, const bare_bigint<MAX_LEN2>& in, int len)
 {
-#if MAX_LEN==2
-	if(len==0)
+	if(MAX_LEN1==2)
 	{
-		out.n[0]=0;
-		out.n[1]=0;
-		return;
-	}
-
-	__m128i inval = _mm_loadu_si128((const __m128i*)&in.n[0]);
-	__m128i rev = bit_reverse(inval);
-//	__m128i a = shift_right(rev, 128-len);
-//	__m128i b = _mm_or_si128(a, shift_left(inval, len+1));
-	
-	int y = 128-len;
-	__m128i a, b;
-	if(128-len<=64)
-	{
-		int y = 128-len;
-		__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y));
-		__m128i rem = _mm_sll_epi64(rev, _mm_set_epi64x(0, 64-y));
-		a = _mm_or_si128(t, _mm_srli_si128(rem, 8));
-		y = len+1;
-		t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y-64));
-		b = _mm_slli_si128(t, 8);
-	}
-	else
-	{
-		int y = 128-len;
-		__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y-64));
-		a = _mm_srli_si128(t, 8);
-		y = len+1;
-		t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y));
-		__m128i rem = _mm_srl_epi64(inval, _mm_set_epi64x(0, 64-y));
-		b = _mm_or_si128(t, _mm_slli_si128(rem, 8));
-
-	}
-	/*
-	y = len+1;
-	if(y<64)
-	{
-		__m128i t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y));
-		__m128i rem = _mm_srl_epi64(inval, _mm_set_epi64x(0, 64-y));
-		b = _mm_or_si128(t, _mm_slli_si128(rem, 8));
-	}
-	else
-	{
-		__m128i t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y-64));
-		b = _mm_slli_si128(t, 8);
-	}
-	*/
-	b = _mm_or_si128(a, b);
-	
-	//uint64_t temp[2];
-	_mm_storeu_si128((__m128i*)&out.n[0], b);
-	/*
-	_mm_storeu_si128((__m128i*)temp, b);
-
-	int shift = len & 63;
-	int qw_len = (len+63) >> 6;
-	if(len > 64)
-	{
-		int shift = len - 64;
-		out.n[0] = bit_reverse(in.n[1]); // 0 -> 127, 63 -> 64
-		out.n[1] = bit_reverse(in.n[0]); // 64 -> 63, 127 -> 0
-		out.n[0] = (out.n[0]>>(64-shift)) | (out.n[1] << shift);
-		out.n[1] >>= 64-shift;
-		//out.n[1] |= in.n[0] << shift;
-	}
-	else
-	{
-		out.n[0] = bit_reverse(in.n[0]); // 0 -> 63
-		out.n[0] >>= 64-len;
-		out.n[1] = 0;
-		//out.n[0] |= in.n[0] << (len+1);
-		//out.n[1] = in.n[0] << (len+1);
-	}
-
-	shift = (len+1) & 63;
-	qw_len = (len+1) >> 6;
-
-	if(qw_len==0)
-	{
-		out.n[0] |= in.n[0] << shift;
-		out.n[1] |= in.n[1] << shift;
-		out.n[1] |= in.n[0] >> (64-shift);
-	}
-	else if(qw_len==1)
-	{
-		out.n[1] |= in.n[0]<<shift;
-	}
-	if(out.n[0]!=temp[0] || out.n[1]!=temp[1])
-	{
-		printf("Mismatch: %I64x %I64x  vs %I64x %I64x (len %d)\n",
-			out.n[0], out.n[1], temp[0], temp[1], len);
-		exit(-1);
-	}
-	*/
-#else
-	int k;
-	for(k=0; k<MAX_LEN; k++)
-		out.n[k]=0;
-	if(len==0)
-		return;
-	int shift = len & 63;
-	int qw_len = (len+63) >> 6;
-	if(shift != 0)
-	{
-		for(k=0; k<qw_len-1; k++)
+		if(len==0)
 		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out.n[qw_len-2-k] |= x << shift;
-			out.n[qw_len-1-k] |= x >> (64-shift);
-			// bits k*64 to k*64+63
-			// go into n-(k+1)*64 to n-1-k*64
+			//out = in;
+			//out >>= 1;
+			out.clear();
+			return;
 		}
-		uint64_t x = bit_reverse(in.n[qw_len-1]);
-		out.n[0] |= x >> (64-shift);
-	}
-	else
-	{
-		for(k=0; k<qw_len; k++)
+		if(len>128)
 		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out.n[qw_len-1-k] = x;
-		}
-	}
-	shift = (len+1) & 63;
-	qw_len = (len+1) >> 6;
-
-	if(shift != 0)
-	{
-		int i;
-		for(i=0; i+qw_len<MAX_LEN; i++)
-		{
-			out.n[i+qw_len] |= in.n[i] << shift;
-			if(i+qw_len+1<MAX_LEN)
-				out.n[i+qw_len+1] |= in.n[i] >> (64-shift);
-		}
-	}
-	else
-	{
-		int i;
-		for(i=0; i+qw_len<MAX_LEN; i++)
-			out.n[i+qw_len] |= in.n[i];
-	}
-#endif
-}
-
-inline void invert(bigint& out, const bigint& in, int len)
-{
-	out.len = in.len;
-	invert((bare_bigint&)out, (const bare_bigint&)in, len);
-}
-
-
-inline void invert2(bigint& out, const bigint& in, int len)
-{
-	out.len = in.len;
-	int k;
-	for(k=0; k<MAX_LEN; k++)
-		out.n[k]=0;
-	int shift = len & 63;
-	int qw_len = (len+63) >> 6;
-	
-#if MAX_LEN==2
-	if(len > 64)
-	{
-		int shift = len - 64;
-		out.n[0] = bit_reverse(in.n[1]); // 0 -> 127, 63 -> 64
-		out.n[1] = bit_reverse(in.n[0]); // 64 -> 63, 127 -> 0
-		out.n[0] = (out.n[0]>>(64-shift)) | (out.n[1] << shift);
-		out.n[1] >>= 64-shift;
-	}
-	else
-	{
-		out.n[0] = bit_reverse(in.n[0]); // 0 -> 63
-		out.n[0] >>= 64-len;
-	}
-#else
-	bigint out2;
-	if(shift != 0)
-	{
-		for(k=0; k<qw_len-1; k++)
-		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out2.n[qw_len-2-k] |= x << shift;
-			out2.n[qw_len-1-k] |= x >> (64-shift);
-			// bits k*64 to k*64+63
-			// go into n-(k+1)*64 to n-1-k*64
-		}
-		uint64_t x = bit_reverse(in.n[qw_len-1]);
-		out2.n[0] |= x >> (64-shift);
-	}
-	else
-	{
-		for(k=0; k<qw_len; k++)
-		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out2.n[qw_len-1-k] = x;
-		}
-	}
-	for(int i=0; i<len; i++)
-		if(out.bit(i) != out2.bit(i))
-		{
-			printf("Mismatch in bit %d, len %d\n", i, len);
+			printf("invert() overflow\n");
 			exit(-1);
 		}
 
-#endif
+		__m128i inval = _mm_loadu_si128((const __m128i*)&in.n[0]);
+		__m128i rev = bit_reverse(inval);
+	
+		int y = 128-len;
+		__m128i a, b;
+		if(128-len<=64)
+		{
+			int y = 128-len;
+			__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y));
+			__m128i rem = _mm_sll_epi64(rev, _mm_set_epi64x(0, 64-y));
+			a = _mm_or_si128(t, _mm_srli_si128(rem, 8));
+			y = len+1;
+			t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y-64));
+			b = _mm_slli_si128(t, 8);
+		}
+		else
+		{
+			int y = 128-len;
+			__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y-64));
+			a = _mm_srli_si128(t, 8);
+			y = len+1;
+			t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y));
+			__m128i rem = _mm_srl_epi64(inval, _mm_set_epi64x(0, 64-y));
+			b = _mm_or_si128(t, _mm_slli_si128(rem, 8));
+
+		}
+		b = _mm_or_si128(a, b);
+		_mm_storeu_si128((__m128i*)&out.n[0], b);
+	}
+	else
+	{
+		out.clear();
+		if(len==0)
+		{
+			//out = in;
+			//out >>= 1;
+			return;
+		}
+		if(len<=128)
+		{
+			__m128i inval = _mm_loadu_si128((const __m128i*)&in.n[0]);
+			__m128i rev = bit_reverse(inval);
+
+			int y = 128-len;
+			__m128i a, b;
+			if(128-len<=64)
+			{
+				int y = 128-len;
+				__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y));
+				__m128i rem = _mm_sll_epi64(rev, _mm_set_epi64x(0, 64-y));
+				a = _mm_or_si128(t, _mm_srli_si128(rem, 8));
+				y = len+1;
+				t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y-64));
+				b = _mm_slli_si128(t, 8);
+			}
+			else
+			{
+				int y = 128-len;
+				__m128i t = _mm_srl_epi64(rev, _mm_set_epi64x(0, y-64));
+				a = _mm_srli_si128(t, 8);
+				y = len+1;
+				t = _mm_sll_epi64(inval, _mm_set_epi64x(0, y));
+				__m128i rem = _mm_srl_epi64(inval, _mm_set_epi64x(0, 64-y));
+				b = _mm_or_si128(t, _mm_slli_si128(rem, 8));
+
+			}
+			b = _mm_or_si128(a, b);
+			_mm_storeu_si128((__m128i*)&out.n[0], b);
+			return;
+		}
+
+		int k;
+		for(k=0; k<MAX_LEN1; k++)
+			out.n[k]=0;
+		int shift = len & 63;
+		int qw_len = (len+63) >> 6;
+		if(shift != 0)
+		{
+			for(k=0; k<qw_len-1; k++)
+			{
+				uint64_t x = bit_reverse(in.n[k]);
+				out.n[qw_len-2-k] |= x << shift;
+				out.n[qw_len-1-k] |= x >> (64-shift);
+				// bits k*64 to k*64+63
+				// go into n-(k+1)*64 to n-1-k*64
+			}
+			uint64_t x = bit_reverse(in.n[qw_len-1]);
+			out.n[0] |= x >> (64-shift);
+		}
+		else
+		{
+			for(k=0; k<qw_len; k++)
+			{
+				uint64_t x = bit_reverse(in.n[k]);
+				out.n[qw_len-1-k] = x;
+			}
+		}
+		shift = (len+1) & 63;
+		qw_len = (len+1) >> 6;
+
+		if(shift != 0)
+		{
+			int i;
+			for(i=0; i+qw_len<MAX_LEN1; i++)
+			{
+				out.n[i+qw_len] |= in.n[i] << shift;
+				if(i+qw_len+1<MAX_LEN1)
+					out.n[i+qw_len+1] |= in.n[i] >> (64-shift);
+			}
+		}
+		else
+		{
+			int i;
+			for(i=0; i+qw_len<MAX_LEN1; i++)
+				out.n[i+qw_len] |= in.n[i];
+		}
+	}
 }
 
-inline void invert3(bigint& out, const bigint& in, int len)
+template<int T>
+inline void invert(ext_bigint<T>& out, const ext_bigint<T>& in, int len)
 {
 	out.len = in.len;
-	int k;
-	for(k=0; k<MAX_LEN; k++)
-		out.n[k]=0;
-	if(len==0)
-		return;
-	int shift = len & 63;
-	int qw_len = (len+63) >> 6;
-#if MAX_LEN==2
-
-	if(len > 64)
-	{
-		int shift = len - 64;
-		out.n[0] = bit_reverse(in.n[1]); // 0 -> 127, 63 -> 64
-		out.n[1] = bit_reverse(in.n[0]); // 64 -> 63, 127 -> 0
-		out.n[0] = (out.n[0]>>(64-shift)) | (out.n[1] << shift);
-		out.n[1] >>= 64-shift;
-		//out.n[1] |= in.n[0] << shift;
-	}
-	else
-	{
-		out.n[0] = bit_reverse(in.n[0]); // 0 -> 63
-		out.n[0] >>= 64-len;
-		out.n[1] = 0;
-		//out.n[0] |= in.n[0] << (len+1);
-		//out.n[1] = in.n[0] << (len+1);
-	}
-
-	shift = (len+1) & 63;
-	qw_len = (len+1) >> 6;
-
-	if(qw_len==0)
-	{
-		out.n[0] |= in.n[0] >> shift;
-		out.n[1] |= in.n[1] >> shift;
-		out.n[0] |= in.n[1] << (64-shift);
-	}
-	else if(qw_len==1)
-	{
-		out.n[0] |= in.n[1]>>shift;
-	}
-#else
-//	...not implemented ...
-	if(shift != 0)
-	{
-		for(k=0; k<qw_len-1; k++)
-		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out.n[qw_len-2-k] |= x << shift;
-			out.n[qw_len-1-k] |= x >> (64-shift);
-			// bits k*64 to k*64+63
-			// go into n-(k+1)*64 to n-1-k*64
-		}
-		uint64_t x = bit_reverse(in.n[qw_len-1]);
-		out.n[0] |= x >> (64-shift);
-	}
-	else
-	{
-		for(k=0; k<qw_len; k++)
-		{
-			uint64_t x = bit_reverse(in.n[k]);
-			out.n[qw_len-1-k] = x;
-		}
-	}
-	shift = (len+1) & 63;
-	qw_len = (len+1) >> 6;
-
-	if(shift != 0)
-	{
-		int i;
-		for(i=0; i+qw_len<MAX_LEN; i++)
-		{
-			out.n[i] |= in.n[i+qw_len] >> shift;
-			if(i+qw_len+1<MAX_LEN)
-				out.n[i] |= in.n[i+qw_len+1] << (64-shift);
-		}
-	}
-	else
-	{
-		int i;
-		for(i=0; i+qw_len<MAX_LEN; i++)
-			out.n[i] |= in.n[i+qw_len];
-	}
-#endif
+	invert((bare_bigint<T>&)out, (const bare_bigint<T>&)in, len);
 }
 
 inline uint64_t rand64()

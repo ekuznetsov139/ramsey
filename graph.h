@@ -1,6 +1,10 @@
 #pragma once
 #include "bigint.h"
 
+
+/**
+Basically a stripped down std::vector (substantially faster than the original in some situations)
+**/
 template <class T>
 struct buffer
 {
@@ -69,27 +73,24 @@ struct graph
 	lite_vector cliques[8];
 	int clique_counts[2][MAX_DEPTH];
 	const graph* parent_ext;
-	buffer<int> new_marks[2];
-	buffer<pair<int,int> > new_bits;
 	buffer<int> vmatch;
-#if MAX_LEN==2
-	bigint extensions[4][MAX_LEN*64];
-#endif
-	bool set_extensions;
-	int max_set_ext;
+
+	bigint implied_mask[2];
+	bool implied_mask_set;
+	/*
 	bigint combo_mask[2][2*MAX_LEN*64];
 	bigint* combo_ptrs[2];
+	*/
+	bigint explored[2];
+
+	bool known_shifted_ref_masks;
+	int shifted_ref_mask_len;
+	bigint shifted_ref_masks[GRAPH_MAX_LEN*64+5];
 
 	void merge();
-
-	float save_rates[64];
-	int save_base;
-
 	int best_next_bit;
-	uint64_t v_a0, v_b0, v_a1, v_b1;
-	int second_best_next_bit;
 
-	graph() : n(0), set_extensions(false), parent_ext(0), dirty(false) {}
+	graph() : n(0), parent_ext(0), dirty(false), known_shifted_ref_masks(false), shifted_ref_mask_len(0), implied_mask_set(false){}
 
 	buffer<const lite_vector*> parent_cliques[8];
 	void reset();
@@ -101,32 +102,33 @@ struct graph
 	void check_first_unset_bit();
 	void construct_shifted_masks(int target);
 	void update_shifted_masks(int color, int target, int n);
-	void forced_bit_search(int kmax[2], int target, buffer<int> new_marks[2], bool use_parent_cliques=true, int color_mask=3, int minpos0=0, int minpos1=0, bool debug=false);
-	void forced_bit_search2(int kmax[2], int target, int color, int new_bit, buffer<int> new_marks[2], int sizePrev, bool debug=false);
-	int new_clique_search(int kmax[2], int target, buffer<int> new_marks[2], bigint* badmask=0);
-	bool set_bit(int color, int new_bit, int kmax[2], bool exact=false, bigint* badmask=0);
-	bool set_bits(int color, buffer<int>& new_bits, int kmax[2], int target, bigint* badmask=0);
+	void forced_bit_search(int kmax[2], int target, bigint new_marks[2], bool use_parent_cliques=true, int color_mask=3, int minpos0=0, int minpos1=0);
+	void forced_bit_search2(int kmax[2], int target, int color, int new_bit, bigint& new_mask, int sizePrev);
+	bool new_clique_search(int kmax[2], int color, int target, bigint new_mark);
+	bool set_bit(int color, int new_bit, int kmax[2], int target, bool test_only=false);
+
+	void forced_bit_search_oneside(int kmax, int target, int color, bigint& new_mask, int minpos);
 private:
 	graph(const graph& g) {}
 public:
 	void operator=(graph& g);
 };
 
-bool build_graph2(graph& gOut, const bigint2& mask, int kmax[2]);
-bool build_graph3(graph& gOut, const bigint2& mask, int kmax[2]);
+bool build_graph_old(graph& gOut, const bigint2& mask, int kmax[2]);
+bool build_graph(graph& gOut, const bigint2& mask, int kmax[2], bool do_minus2=true);
 
-bool extend(graph& g, int color, int kmax[2], int target, int new_bit);
-bool extend(graph& gOut, const graph& g, int color, int kmax[2], int target, int new_bit, int search_mode=1, bool debug = false, int force_range = 0);
+bool extend(graph& g, int color, int kmax[2], int target, int new_bit, bool full_reconst=true);
+bool extend(graph& gOut, const graph& g, int color, int kmax[2], int target, int new_bit, int search_mode=1);
 
-int max_extensibility(graph& g, int kmax[2], int target, bool debug=false);
+bool max_extensibility(graph& g, int kmax[2], int target, bool debug=false);
 
-bool link_pair_search(int target, int kmax[2], bigint* combo_ptrs[2], graph& g, buffer<pair<int,int> >& new_bits, bool debug=false, bool use_parents=false);
+bool link_pair_search(int target, int kmax[2], graph& g, bigint new_masks[2], bool debug, bool use_parents);
 
 
 inline void bigint_to_positions(int* positions, int& c, int len, const bigint& x)
 {
-	if(len>MAX_LEN*64)
-		len=MAX_LEN*64;
+	if(len>GRAPH_MAX_LEN*64)
+		len=GRAPH_MAX_LEN*64;
 	memset(positions, 0, MAX_DEPTH*sizeof(int));
 	int m;
 	c=0;
@@ -138,24 +140,4 @@ inline void bigint_to_positions(int* positions, int& c, int len, const bigint& x
 			c++;
 		}
 	}
-}
-
-bool verify_clique(const bigint& x, int target, const bigint& mask);
-void verify_extension(const bigint& x, int n, int target, const bigint& mask);
-void verify_extension(const bigint& x, int gap, int n, int target, const bigint& mask);
-void verify_extension_2x(const bigint& x, int n1, int n2, int target, const bigint& mask);
-void verify_extension_2x(const bigint& x, int idx1, int idx2, int n1, int n2, int target, const bigint& mask);
-
-void validate_graph_build_native(const graph& g, const bigint2& mask);
-
-
-inline void validate_graph_build(const graph& g, const bigint2& mask)
-{
-	return;
-	//validate_graph_build_native(g, mask);
-}
-
-inline void validate_graph_build(const graph& g)
-{
-	validate_graph_build(g, make_pair(g.mask0, g.mask));
 }
